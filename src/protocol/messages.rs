@@ -63,6 +63,8 @@ pub enum Command {
         enabled: bool,
     },
     Stop,
+    /// Load the library again.
+    RefreshLibrary,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

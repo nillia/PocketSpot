@@ -11,7 +11,8 @@ mod wire;
 
 pub use messages::{CLIENT_MARGIN, Command, Reject, Request, Response};
 pub use state::{
-    ActiveDevice, FailureKind, PlayState, Playback, PlaybackContext, Session, Snapshot, Track,
+    ActiveDevice, FailureKind, Library, LibraryItem, LibraryKind, LoadState, PlayState, Playback,
+    PlaybackContext, Session, Snapshot, Track,
 };
 pub(crate) use wire::{Incoming, ResponseEnvelope, decode_request, read_message, write_message};
 

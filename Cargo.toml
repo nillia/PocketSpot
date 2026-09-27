@@ -12,15 +12,25 @@ mock = []
 [dependencies]
 # librespot's development branch, pinned: the latest release (0.8.0) does not
 # have the device-code pairing flow.
+librespot-connect = { version = "0.8.0", git = "https://github.com/librespot-org/librespot", rev = "939dc5ee9d833e1980f9495241219d9d4868a061", default-features = false, features = ["rustls-tls-webpki-roots"] }
 librespot-core = { version = "0.8.0", git = "https://github.com/librespot-org/librespot", rev = "939dc5ee9d833e1980f9495241219d9d4868a061", default-features = false, features = ["rustls-tls-webpki-roots"] }
+librespot-metadata = { version = "0.8.0", git = "https://github.com/librespot-org/librespot", rev = "939dc5ee9d833e1980f9495241219d9d4868a061", default-features = false, features = ["rustls-tls-webpki-roots"] }
 librespot-oauth = { version = "0.8.0", git = "https://github.com/librespot-org/librespot", rev = "939dc5ee9d833e1980f9495241219d9d4868a061", default-features = false, features = ["rustls-tls-webpki-roots"] }
+librespot-playback = { version = "0.8.0", git = "https://github.com/librespot-org/librespot", rev = "939dc5ee9d833e1980f9495241219d9d4868a061", default-features = false, features = ["rustls-tls-webpki-roots"] }
+librespot-protocol = { version = "0.8.0", git = "https://github.com/librespot-org/librespot", rev = "939dc5ee9d833e1980f9495241219d9d4868a061" }
 log = { version = "0.4.34", features = ["std"] }
+protobuf = "3.7.2"
 rustix = { version = "1.1.5", features = ["event", "fs", "process"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 signal-hook = "0.4.4"
 thiserror = "2.0.21"
 tokio = { version = "1.53.1", features = ["rt", "time", "sync", "macros"] }
+
+# Audio through ALSA on Linux (the Brick). Other systems build the player
+# without an audio backend and play silently (see engine::spotify::player).
+[target.'cfg(target_os = "linux")'.dependencies]
+librespot-playback = { version = "0.8.0", git = "https://github.com/librespot-org/librespot", rev = "939dc5ee9d833e1980f9495241219d9d4868a061", default-features = false, features = ["rustls-tls-webpki-roots", "alsa-backend"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"

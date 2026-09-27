@@ -6,8 +6,8 @@ use super::catalog;
 use crate::{
     engine::Refusal,
     protocol::{
-        ActiveDevice, Command, FailureKind, PlayState, Playback, PlaybackContext, Reject, Session,
-        Snapshot,
+        ActiveDevice, Command, FailureKind, Library, LoadState, PlayState, Playback,
+        PlaybackContext, Reject, Session, Snapshot,
     },
 };
 use std::time::Duration;
@@ -15,6 +15,8 @@ use std::time::Duration;
 const PAIR_AFTER_MS: u64 = 700;
 const CONNECT_MS: u64 = 600;
 const RECONNECT_MS: u64 = 2_000;
+/// How long the library takes to load, like a round trip to Spotify.
+const LIBRARY_MS: u64 = 500;
 const PAIRING_LIFETIME_MS: u64 = 10 * 60 * 1000;
 /// "Previous" restarts the track instead when it has played longer than this.
 const RESTART_THRESHOLD_MS: u32 = 3_000;
@@ -64,6 +66,7 @@ enum Timer {
     CodeExpired,
     Connected,
     Reconnect,
+    LibraryLoaded,
 }
 
 /// What to restore after a reconnect.
@@ -108,6 +111,7 @@ impl MockCore {
         };
         if options.signed_in {
             core.state.session = Session::Ready;
+            core.load_library(now_ms);
         } else {
             core.schedule(now_ms + PAIR_AFTER_MS, Timer::ShowPairing);
         }
@@ -172,7 +176,16 @@ impl MockCore {
                 self.stop();
                 Ok(())
             }
+            Command::RefreshLibrary => {
+                self.load_library(now_ms);
+                Ok(())
+            }
         }
+    }
+
+    fn load_library(&mut self, now_ms: u64) {
+        self.state.library.state = LoadState::Loading;
+        self.schedule(now_ms + LIBRARY_MS, Timer::LibraryLoaded);
     }
 
     /// A new pairing code, or an immediate retry after a network failure.
@@ -248,8 +261,15 @@ impl MockCore {
                 self.state.session = Session::Connecting;
                 self.schedule(at + CONNECT_MS, Timer::Connected);
             }
+            Timer::LibraryLoaded => {
+                self.state.library = Library {
+                    state: LoadState::Ready,
+                    items: catalog::library(),
+                };
+            }
             Timer::Connected => {
                 self.state.session = Session::Ready;
+                self.load_library(at);
                 if let Some(resume) = self.resume.take() {
                     self.start(&resume.context_uri, resume.index, resume.position_ms, at);
                 }
@@ -285,6 +305,9 @@ impl MockCore {
         self.queue.clear();
         self.state.playback.track = None;
         self.state.playback.context = None;
+        self.state.library = Library::default();
+        self.timers
+            .retain(|(_, timer)| *timer != Timer::LibraryLoaded);
     }
 
     fn play(
@@ -459,6 +482,7 @@ mod tests {
     #[test]
     fn pairs_connects_and_becomes_ready_on_its_timeline() {
         let mut core = MockCore::new(MockOptions::default(), T0);
+        let ready_at = T0 + PAIR_AFTER_MS + 8_000 + CONNECT_MS;
         assert_eq!(core.state().session, Session::Starting);
         core.advance(T0 + PAIR_AFTER_MS);
         assert!(matches!(
@@ -467,9 +491,23 @@ mod tests {
         ));
         core.advance(T0 + PAIR_AFTER_MS + 8_000);
         assert_eq!(core.state().session, Session::Connecting);
-        core.advance(T0 + PAIR_AFTER_MS + 8_000 + CONNECT_MS);
+        core.advance(ready_at);
         assert_eq!(core.state().session, Session::Ready);
+        core.advance(ready_at + LIBRARY_MS);
         assert_eq!(core.next_deadline(), None);
+    }
+
+    #[test]
+    fn the_library_loads_after_signing_in_and_on_refresh() {
+        let mut core = signed_in();
+        assert_eq!(core.state().library.state, LoadState::Loading);
+        core.advance(T0 + LIBRARY_MS);
+        let library = &core.state().library;
+        assert_eq!(library.state, LoadState::Ready);
+        assert_eq!(library.items[0].name, "Liked Songs");
+        assert_eq!(library.items.len(), 4);
+        core.command(Command::RefreshLibrary, T0 + 1_000).unwrap();
+        assert_eq!(core.state().library.state, LoadState::Loading);
     }
 
     #[test]
@@ -535,6 +573,7 @@ mod tests {
     fn tracks_advance_when_they_end_and_the_playlist_stops_after_the_last() {
         let mut core = signed_in();
         play(&mut core);
+        core.advance(T0 + LIBRARY_MS);
         // "Night Signals" is 256 s long.
         assert_eq!(core.next_deadline(), Some(T0 + 256_000));
         core.advance(T0 + 256_000 + 10_000);

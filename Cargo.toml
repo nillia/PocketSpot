@@ -3,6 +3,12 @@ name = "pocketspot"
 version = "0.0.0"
 edition = "2024"
 
+[features]
+default = ["mock"]
+# The fake playback engine behind `pocketspotd --mock`, for development and
+# tests. Release builds leave it out (`--no-default-features`).
+mock = []
+
 [dependencies]
 log = { version = "0.4.34", features = ["std"] }
 rustix = { version = "1.1.5", features = ["event", "fs", "process"] }

@@ -4,3 +4,8 @@ version = "0.0.0"
 edition = "2024"
 
 [dependencies]
+rustix = { version = "1.1.5", features = ["process"] }
+thiserror = "2.0.21"
+
+[dev-dependencies]
+tempfile = "3.27.0"

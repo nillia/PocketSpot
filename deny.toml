@@ -9,6 +9,26 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+# Every exception states why it does not affect PocketSpot. Remove each one
+# as soon as the dependency that brings it in is updated.
+ignore = [
+    # hyper-proxy2 (via librespot-core) carries an old TLS stack used only
+    # for TLS connections to an HTTP proxy. PocketSpot configures no proxy
+    # (librespot installs one that intercepts nothing); Spotify connections
+    # use the current rustls through hyper-rustls 0.27.
+    { id = "RUSTSEC-2026-0049", reason = "rustls-webpki 0.102: proxy TLS only, no proxy configured" },
+    { id = "RUSTSEC-2026-0098", reason = "rustls-webpki 0.102: proxy TLS only, no proxy configured" },
+    { id = "RUSTSEC-2026-0099", reason = "rustls-webpki 0.102: proxy TLS only, no proxy configured" },
+    { id = "RUSTSEC-2026-0104", reason = "rustls-webpki 0.102: proxy TLS only, no proxy configured" },
+    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile (unmaintained): proxy TLS only, no proxy configured" },
+    # The Marvin attack recovers RSA private keys from decryption timing.
+    # librespot only verifies Spotify's server signature with a public key.
+    { id = "RUSTSEC-2023-0071", reason = "rsa: public-key signature verification only, no private-key operations" },
+    # quick-xml DoS on crafted XML. librespot parses XML only from Spotify's
+    # servers over authenticated TLS; the fix needs librespot to update.
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml: input only from Spotify over TLS; needs a librespot update" },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml: input only from Spotify over TLS; needs a librespot update" },
+]
 
 [licenses]
 version = 2
@@ -27,8 +47,16 @@ allow = [
     "CC0-1.0",
     "Unicode-3.0",
     "MPL-2.0",
+    # webpki-roots: the Mozilla CA certificate list, under a permissive data licence.
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.9
+
+# webpki 0.22 ships an ISC-style LICENSE file but declares no licence.
+[[licenses.clarify]]
+crate = "webpki"
+expression = "ISC"
+license-files = [{ path = "LICENSE", hash = 0x001c7e6c }]
 
 [bans]
 multiple-versions = "warn"
@@ -38,3 +66,5 @@ wildcards = "deny"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# librespot is pinned to a commit of its development branch (see Cargo.toml).
+allow-git = ["https://github.com/librespot-org/librespot"]

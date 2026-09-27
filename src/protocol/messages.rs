@@ -20,6 +20,8 @@ pub enum Request {
     },
     /// Control playback.
     Command { command: Command },
+    /// Show a new pairing code, or retry signing in now after a failure.
+    Pair,
     /// Remove the saved login and return to pairing.
     Logout,
     /// Stop playback and the service. Stable in every protocol version.

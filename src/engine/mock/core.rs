@@ -30,6 +30,8 @@ pub struct MockOptions {
     pub approve_after: Option<Duration>,
     /// Seed for shuffle, so runs are reproducible.
     pub seed: u64,
+    /// How long a pairing code stays valid.
+    pub pairing_lifetime_ms: u64,
 }
 
 impl Default for MockOptions {
@@ -38,6 +40,7 @@ impl Default for MockOptions {
             signed_in: false,
             approve_after: Some(Duration::from_secs(8)),
             seed: 0x5eed,
+            pairing_lifetime_ms: PAIRING_LIFETIME_MS,
         }
     }
 }
@@ -57,6 +60,8 @@ pub enum Fault {
 enum Timer {
     ShowPairing,
     Approve,
+    /// The pairing code shown now expires.
+    CodeExpired,
     Connected,
     Reconnect,
 }
@@ -78,6 +83,8 @@ pub struct MockCore {
     timers: Vec<(u64, Timer)>,
     resume: Option<Resume>,
     seed: u64,
+    /// An expired code is replaced once automatically.
+    auto_refresh: bool,
 }
 
 impl MockCore {
@@ -97,6 +104,7 @@ impl MockCore {
             timers: Vec::new(),
             resume: None,
             seed: options.seed | 1,
+            auto_refresh: true,
         };
         if options.signed_in {
             core.state.session = Session::Ready;
@@ -167,6 +175,29 @@ impl MockCore {
         }
     }
 
+    /// A new pairing code, or an immediate retry after a network failure.
+    pub fn pair(&mut self, now_ms: u64) -> Result<(), Refusal> {
+        self.advance(now_ms);
+        match self.state.session {
+            Session::Ready | Session::Connecting => {
+                Err(Refusal::new(Reject::Invalid, "already signed in"))
+            }
+            Session::Failed {
+                kind: FailureKind::Network,
+                ..
+            } => {
+                self.timers.clear();
+                self.fire(Timer::Reconnect, now_ms);
+                Ok(())
+            }
+            _ => {
+                self.auto_refresh = true;
+                self.show_pairing(now_ms);
+                Ok(())
+            }
+        }
+    }
+
     /// Forget the account and return to pairing.
     pub fn logout(&mut self, now_ms: u64) {
         self.advance(now_ms);
@@ -192,6 +223,7 @@ impl MockCore {
             }
             Fault::LoginRejected => {
                 self.forget_account();
+                self.auto_refresh = true;
                 self.show_pairing(now_ms);
             }
         }
@@ -200,7 +232,19 @@ impl MockCore {
     fn fire(&mut self, timer: Timer, at: u64) {
         match timer {
             Timer::ShowPairing => self.show_pairing(at),
+            Timer::CodeExpired if std::mem::take(&mut self.auto_refresh) => self.show_pairing(at),
+            Timer::CodeExpired => {
+                self.timers.clear();
+                self.state.session = Session::Failed {
+                    kind: FailureKind::Auth,
+                    message: "Pairing code expired".into(),
+                    retry_at_ms: None,
+                };
+            }
             Timer::Approve | Timer::Reconnect => {
+                // The code has been used; it no longer expires.
+                self.timers
+                    .retain(|(_, timer)| *timer != Timer::CodeExpired);
                 self.state.session = Session::Connecting;
                 self.schedule(at + CONNECT_MS, Timer::Connected);
             }
@@ -222,8 +266,12 @@ impl MockCore {
         self.state.session = Session::Pairing {
             url: PAIRING_URL.into(),
             code: PAIRING_CODE.into(),
-            expires_at_ms: now_ms + PAIRING_LIFETIME_MS,
+            expires_at_ms: now_ms + self.options.pairing_lifetime_ms,
         };
+        self.schedule(
+            now_ms + self.options.pairing_lifetime_ms,
+            Timer::CodeExpired,
+        );
         if let Some(after) = self.options.approve_after {
             let after = u64::try_from(after.as_millis()).unwrap_or(u64::MAX);
             self.schedule(now_ms.saturating_add(after), Timer::Approve);
@@ -551,6 +599,43 @@ mod tests {
         assert_eq!(core.state().playback.state, PlayState::Playing);
         assert_eq!(title(&core), "Night Signals");
         assert_eq!(core.state().playback.position_at(ready), 60_000);
+    }
+
+    #[test]
+    fn an_expired_code_is_replaced_once_then_fails_until_asked_again() {
+        let mut core = MockCore::new(
+            MockOptions {
+                approve_after: None,
+                ..MockOptions::default()
+            },
+            T0,
+        );
+        core.advance(T0 + PAIR_AFTER_MS);
+        let shown = T0 + PAIR_AFTER_MS;
+        core.advance(shown + PAIRING_LIFETIME_MS);
+        assert!(
+            matches!(core.state().session, Session::Pairing { expires_at_ms, .. } if expires_at_ms == shown + 2 * PAIRING_LIFETIME_MS),
+            "a fresh code replaced the first"
+        );
+        core.advance(shown + 2 * PAIRING_LIFETIME_MS);
+        assert!(matches!(
+            &core.state().session,
+            Session::Failed { kind: FailureKind::Auth, message, .. } if message == "Pairing code expired"
+        ));
+        assert_eq!(core.next_deadline(), None, "waits for the user");
+        core.pair(shown + 3 * PAIRING_LIFETIME_MS).unwrap();
+        assert!(matches!(core.state().session, Session::Pairing { .. }));
+    }
+
+    #[test]
+    fn pair_retries_a_network_failure_at_once_and_is_refused_when_signed_in() {
+        let mut core = signed_in();
+        assert_eq!(core.pair(T0).unwrap_err().reason, Reject::Invalid);
+        core.inject(Fault::NetworkLoss, T0);
+        core.pair(T0 + 100).unwrap();
+        assert_eq!(core.state().session, Session::Connecting);
+        core.advance(T0 + 100 + CONNECT_MS);
+        assert_eq!(core.state().session, Session::Ready);
     }
 
     #[test]

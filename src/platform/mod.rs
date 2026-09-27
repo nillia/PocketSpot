@@ -204,6 +204,13 @@ impl ReadyProfile {
     pub fn audio(&self) -> AudioOutput {
         self.0.audio
     }
+
+    /// Create (or check) `name` inside the state directory, private like it.
+    pub fn private_state_subdir(&self, name: &str) -> Result<PathBuf, ProfileError> {
+        let path = self.0.state_dir.join(name);
+        private_dir::ensure(&path, self.0.uid)?;
+        Ok(path)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

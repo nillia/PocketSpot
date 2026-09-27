@@ -7,8 +7,9 @@ pub mod server;
 pub mod shutdown;
 
 use crate::{
+    engine::{EngineHandle, Published},
     platform::{Platform, Profile, SystemEnvironment},
-    protocol::{PROTOCOL_VERSION, Reject, Request, Response, SERVICE_NAME, SOCKET_FILE, Snapshot},
+    protocol::{PROTOCOL_VERSION, Reject, Request, Response, SERVICE_NAME, SOCKET_FILE},
 };
 use lock::{InstanceLock, LockError};
 use server::{Handler, Server};
@@ -31,11 +32,22 @@ pub enum Exit {
     AlreadyRunning = 3,
 }
 
+/// How to run the service.
+#[derive(Clone, Debug, Default)]
+pub struct Options {
+    /// Use this platform instead of detecting it.
+    pub platform: Option<Platform>,
+    /// Play fictional music with the mock engine.
+    #[cfg(feature = "mock")]
+    pub mock: Option<crate::engine::mock::MockOptions>,
+}
+
 /// Run the service until it is asked to stop.
 ///
 /// Diagnostics go to standard error only until the log is open. After that
 /// the service never writes to the terminal, which may be gone by then.
-pub fn run(explicit: Option<Platform>) -> Exit {
+pub fn run(options: Options) -> Exit {
+    let explicit = options.platform;
     if let Err(error) = shutdown::ignore_hangup() {
         eprintln!("pocketspotd: cannot handle signals: {error}");
         return Exit::Failed;
@@ -93,17 +105,24 @@ pub fn run(explicit: Option<Platform>) -> Exit {
             return Exit::Failed;
         }
     };
+    let published = Published::new(start_revision());
+    let engine = match start_engine(&options, published.clone()) {
+        Ok(engine) => engine,
+        Err(error) => {
+            log::error!("cannot start the playback engine: {error}");
+            return Exit::Failed;
+        }
+    };
     eprintln!("pocketspotd: running; log: {}", log_path.display());
     let handler = Arc::new(ServiceHandler {
-        snapshot: Snapshot {
-            revision: start_revision(),
-            ..Snapshot::default()
-        },
+        engine,
+        idle: published,
         shutdown: shutdown.clone(),
     });
-    let result = server.run(handler, &shutdown);
+    let result = server.run(handler.clone(), &shutdown);
     // Unreachable from now on, before anything else shuts down.
     drop(server);
+    handler.stop_engine();
     match result {
         Ok(()) => {
             log::info!("stopped");
@@ -127,11 +146,38 @@ fn start_revision() -> u64 {
         .saturating_mul(1000)
 }
 
-/// Answers the protocol. Playback commands become available with the
-/// playback engine.
+/// The engine chosen by `options`, if any. The Spotify engine arrives later;
+/// until then only the mock engine plays.
+fn start_engine(options: &Options, published: Published) -> std::io::Result<Option<EngineHandle>> {
+    #[cfg(feature = "mock")]
+    if let Some(mock) = options.mock {
+        log::info!("playing fictional music (mock engine)");
+        return crate::engine::mock::spawn(mock, published).map(Some);
+    }
+    let _ = (options, published);
+    Ok(None)
+}
+
+/// Answers the protocol on top of the engine.
 struct ServiceHandler {
-    snapshot: Snapshot,
+    engine: Option<EngineHandle>,
+    /// What is published while no engine runs.
+    idle: Published,
     shutdown: Shutdown,
+}
+
+impl ServiceHandler {
+    fn stop_engine(&self) {
+        if let Some(engine) = &self.engine {
+            engine.stop();
+        }
+    }
+
+    fn engine(&self) -> Result<&EngineHandle, Response> {
+        self.engine
+            .as_ref()
+            .ok_or_else(|| Response::rejected(Reject::Unavailable, "playback is not available yet"))
+    }
 }
 
 impl Handler for ServiceHandler {
@@ -143,22 +189,41 @@ impl Handler for ServiceHandler {
                 pid: std::process::id(),
                 protocol: PROTOCOL_VERSION,
             },
-            Request::Snapshot { since } if since == Some(self.snapshot.revision) => {
-                Response::Unchanged {
-                    revision: self.snapshot.revision,
+            Request::Snapshot { since } => {
+                let snapshot = self
+                    .engine
+                    .as_ref()
+                    .map_or_else(|| self.idle.get(), EngineHandle::snapshot);
+                if since == Some(snapshot.revision) {
+                    Response::Unchanged {
+                        revision: snapshot.revision,
+                    }
+                } else {
+                    Response::Snapshot {
+                        snapshot: Box::new((*snapshot).clone()),
+                    }
                 }
             }
-            Request::Snapshot { .. } => Response::Snapshot {
-                snapshot: Box::new(self.snapshot.clone()),
+            Request::Command { command } => match self.engine() {
+                Ok(engine) => reply(engine.command(command)),
+                Err(unavailable) => unavailable,
             },
-            Request::Command { .. } | Request::Logout => {
-                Response::rejected(Reject::Unavailable, "playback is not available yet")
-            }
+            Request::Logout => match self.engine() {
+                Ok(engine) => reply(engine.logout()),
+                Err(unavailable) => unavailable,
+            },
             Request::Shutdown => {
                 log::info!("shutdown requested");
                 self.shutdown.request();
                 Response::Accepted
             }
         }
+    }
+}
+
+fn reply(result: Result<(), crate::engine::Refusal>) -> Response {
+    match result {
+        Ok(()) => Response::Accepted,
+        Err(refusal) => Response::rejected(refusal.reason, refusal.message),
     }
 }

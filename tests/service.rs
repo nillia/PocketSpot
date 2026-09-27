@@ -227,3 +227,63 @@ fn a_socket_left_by_a_killed_service_is_replaced() {
     signal(&next, Signal::TERM);
     assert_eq!(exit_of(&mut next).code(), Some(0));
 }
+
+#[cfg(feature = "mock")]
+#[test]
+fn plays_fictional_music_with_the_mock_engine() {
+    use pocketspot::protocol::{PlayState, Session, Snapshot};
+
+    let dirs = Dirs::new();
+    let starts_before = dirs.log().matches(" started ").count();
+    let mut service = dirs
+        .command()
+        .arg("--mock")
+        .env("POCKETSPOT_MOCK_SIGNED_IN", "1")
+        .spawn()
+        .unwrap();
+    until("the service to start", || {
+        dirs.log().matches(" started ").count() > starts_before
+    });
+    let snapshot = || -> Snapshot {
+        match client::request(&dirs.socket(), Request::Snapshot { since: None }).unwrap() {
+            Response::Snapshot { snapshot } => *snapshot,
+            other => panic!("{other:?}"),
+        }
+    };
+    until("the session to be ready", || {
+        snapshot().session == Session::Ready
+    });
+    let command = |command| client::request(&dirs.socket(), Request::Command { command }).unwrap();
+
+    let (playlist, name) = pocketspot::engine::mock::playlists().next().unwrap();
+    let play = protocol::Command::Play {
+        context_uri: playlist.into(),
+        track_uri: None,
+    };
+    assert_eq!(command(play), Response::Accepted);
+    let playing = snapshot();
+    assert_eq!(playing.playback.state, PlayState::Playing);
+    let context = playing.playback.context.unwrap();
+    assert_eq!(context.name.as_deref(), Some(name));
+    let first = playing.playback.track.unwrap().title;
+
+    assert_eq!(command(protocol::Command::Next), Response::Accepted);
+    assert_ne!(snapshot().playback.track.unwrap().title, first);
+    assert_eq!(command(protocol::Command::Pause), Response::Accepted);
+    assert_eq!(snapshot().playback.state, PlayState::Paused);
+    assert!(matches!(
+        command(protocol::Command::SetVolume { percent: 200 }),
+        Response::Rejected {
+            reason: Reject::Invalid,
+            ..
+        }
+    ));
+
+    assert_eq!(
+        client::request(&dirs.socket(), Request::Logout).unwrap(),
+        Response::Accepted
+    );
+    assert!(matches!(snapshot().session, Session::Pairing { .. }));
+    client::request(&dirs.socket(), Request::Shutdown).unwrap();
+    assert_eq!(exit_of(&mut service).code(), Some(0));
+}

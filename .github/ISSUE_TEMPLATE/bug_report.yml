@@ -1,0 +1,55 @@
+name: Bug report
+description: Something does not work as intended.
+labels: ["type:bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Never paste tokens, credentials, pairing codes or unredacted logs.
+  - type: input
+    id: version
+    attributes:
+      label: PocketSpot version
+      placeholder: v0.1.0
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Device and firmware
+      placeholder: TrimUI Brick, NextUI 1.1.1
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. …
+        2. …
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines (redacted)
+      render: text
+  - type: checkboxes
+    id: redacted
+    attributes:
+      label: Privacy
+      options:
+        - label: This report contains no tokens, credentials, pairing codes or unredacted logs.
+          required: true

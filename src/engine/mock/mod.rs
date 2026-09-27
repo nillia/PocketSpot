@@ -59,6 +59,11 @@ fn run(mut core: MockCore, rx: &Receiver<Message>, published: &Published) {
                 published.publish(core.state());
                 let _ = reply.send(result);
             }
+            Message::Pair(reply) => {
+                let result = core.pair(now);
+                published.publish(core.state());
+                let _ = reply.send(result);
+            }
             Message::Logout(reply) => {
                 core.logout(now);
                 published.publish(core.state());

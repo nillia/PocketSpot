@@ -1,5 +1,7 @@
 //! End to end: the `pocketspotd` binary, started and signalled as the
-//! launcher and the user would.
+//! launcher and the user would. It always runs with the mock engine, so the
+//! tests never contact Spotify.
+#![cfg(feature = "mock")]
 
 use pocketspot::protocol::{
     self, PROTOCOL_VERSION, Reject, Request, Response,
@@ -34,7 +36,8 @@ impl Dirs {
     fn command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_pocketspotd"));
         command
-            .args(["--platform", "development"])
+            .args(["--platform", "development", "--mock"])
+            .env("POCKETSPOT_MOCK_SIGNED_IN", "1")
             .env("POCKETSPOT_STATE_DIR", &self.state)
             .env("POCKETSPOT_RUNTIME_DIR", &self.runtime)
             .stdin(Stdio::null())
@@ -193,7 +196,7 @@ fn answers_the_protocol_and_stops_on_request() {
         )
         .unwrap(),
         Response::Rejected {
-            reason: Reject::Unavailable,
+            reason: Reject::Invalid,
             ..
         }
     ));
@@ -228,19 +231,13 @@ fn a_socket_left_by_a_killed_service_is_replaced() {
     assert_eq!(exit_of(&mut next).code(), Some(0));
 }
 
-#[cfg(feature = "mock")]
 #[test]
 fn plays_fictional_music_with_the_mock_engine() {
     use pocketspot::protocol::{PlayState, Session, Snapshot};
 
     let dirs = Dirs::new();
     let starts_before = dirs.log().matches(" started ").count();
-    let mut service = dirs
-        .command()
-        .arg("--mock")
-        .env("POCKETSPOT_MOCK_SIGNED_IN", "1")
-        .spawn()
-        .unwrap();
+    let mut service = dirs.command().spawn().unwrap();
     until("the service to start", || {
         dirs.log().matches(" started ").count() > starts_before
     });

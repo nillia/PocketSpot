@@ -47,11 +47,15 @@ upgrade and stop it.
 | `identify` | `identity` | 2 s |
 | `snapshot` (optional `since`) | `snapshot`, or `unchanged` when `since` equals the current revision | 2 s |
 | `command` | `accepted` or `rejected` | 2 s |
+| `pair` | `accepted`, or `rejected` when already signed in | 2 s |
 | `logout` | `accepted` or `rejected` | 6 s |
 | `shutdown` | `accepted` | 2 s |
 
 Clients wait 2 seconds longer than the service's bound, so a slow success is
 never reported as a failure.
+
+`pair` asks for a new pairing code (for example after one expired or was
+declined) or retries signing in immediately after a network failure.
 
 ### Commands
 

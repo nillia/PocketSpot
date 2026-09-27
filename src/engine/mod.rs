@@ -8,6 +8,7 @@
 
 #[cfg(feature = "mock")]
 pub mod mock;
+pub mod spotify;
 
 use crate::protocol::{Command, LOGOUT_REPLY_WITHIN, REPLY_WITHIN, Reject, Snapshot};
 use std::{
@@ -48,6 +49,8 @@ pub type Reply = SyncSender<Result<(), Refusal>>;
 /// What the service sends to the engine thread.
 pub enum Message {
     Command(Command, Reply),
+    /// A new pairing code, or an immediate retry after a failure.
+    Pair(Reply),
     Logout(Reply),
     /// Replay a failure (mock engine only, for tests).
     #[cfg(feature = "mock")]
@@ -130,6 +133,11 @@ impl EngineHandle {
     /// Carry out a command, waiting at most the protocol's reply bound.
     pub fn command(&self, command: Command) -> Result<(), Refusal> {
         self.ask(|reply| Message::Command(command, reply), REPLY_WITHIN)
+    }
+
+    /// Ask for a new pairing code or an immediate retry.
+    pub fn pair(&self) -> Result<(), Refusal> {
+        self.ask(Message::Pair, REPLY_WITHIN)
     }
 
     /// Remove the saved login, waiting at most the protocol's logout bound.

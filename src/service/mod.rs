@@ -106,7 +106,7 @@ pub fn run(options: Options) -> Exit {
         }
     };
     let published = Published::new(start_revision());
-    let engine = match start_engine(&options, published.clone()) {
+    let engine = match start_engine(&options, &profile, published.clone()) {
         Ok(engine) => engine,
         Err(error) => {
             log::error!("cannot start the playback engine: {error}");
@@ -146,16 +146,20 @@ fn start_revision() -> u64 {
         .saturating_mul(1000)
 }
 
-/// The engine chosen by `options`, if any. The Spotify engine arrives later;
-/// until then only the mock engine plays.
-fn start_engine(options: &Options, published: Published) -> std::io::Result<Option<EngineHandle>> {
+/// The engine chosen by `options`: the mock engine when asked for, the
+/// Spotify engine otherwise.
+fn start_engine(
+    options: &Options,
+    profile: &crate::platform::ReadyProfile,
+    published: Published,
+) -> std::io::Result<Option<EngineHandle>> {
     #[cfg(feature = "mock")]
     if let Some(mock) = options.mock {
         log::info!("playing fictional music (mock engine)");
         return crate::engine::mock::spawn(mock, published).map(Some);
     }
-    let _ = (options, published);
-    Ok(None)
+    let _ = options;
+    crate::engine::spotify::spawn(profile, published).map(Some)
 }
 
 /// Answers the protocol on top of the engine.
@@ -206,6 +210,10 @@ impl Handler for ServiceHandler {
             }
             Request::Command { command } => match self.engine() {
                 Ok(engine) => reply(engine.command(command)),
+                Err(unavailable) => unavailable,
+            },
+            Request::Pair => match self.engine() {
+                Ok(engine) => reply(engine.pair()),
                 Err(unavailable) => unavailable,
             },
             Request::Logout => match self.engine() {

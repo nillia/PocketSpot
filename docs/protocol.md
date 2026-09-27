@@ -69,6 +69,7 @@ declined) or retries signing in immediately after a network failure.
 | `pause`, `resume`, `next`, `previous`, `stop` | none |
 | `set_volume` | `percent` (0–100) |
 | `set_shuffle` | `enabled` |
+| `refresh_library` | none |
 
 ### Rejections
 
@@ -90,6 +91,7 @@ client decodes snapshots that miss fields it knows.
 | `session` | `starting`, `pairing` (`url`, `code`, `expires_at_ms`), `connecting`, `ready`, `failed` (`kind`, `message`, `retry_at_ms`) |
 | `playback` | `state` (`stopped`, `buffering`, `playing`, `paused`), `track`, `context`, `position_ms` sampled at `position_at_ms`, `volume`, `shuffle` |
 | `device` | `none`, `local`, or `remote` with the Connect device `name` |
+| `library` | `state` (`idle`, `loading`, `ready`, `failed` with `message`) and `items`: `kind` (`playlist`, `liked_songs`), `uri` (to pass to `play`), `name`, `owner`, `tracks` |
 
 Clients poll with `since` set to the last revision they received; an
 unchanged service answers with a few bytes.

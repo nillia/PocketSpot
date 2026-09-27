@@ -1,6 +1,6 @@
 //! The Spotify engine: signs in through librespot with Spotify's device-code
-//! flow and keeps the session. Playback commands arrive with a later
-//! release.
+//! flow, then plays through librespot's player under Spotify Connect's
+//! control (`Spirc`), which also makes the handheld a Connect device.
 //!
 //! librespot is asynchronous, so the engine thread runs a single-threaded
 //! tokio runtime, and a small bridge thread forwards the service's messages
@@ -12,21 +12,31 @@
 //! Pairing codes, URLs and tokens are never logged; librespot's error text
 //! is only inspected, never written out.
 
+mod library;
+mod playback;
+mod player;
 mod policy;
 mod store;
 
 use super::{EngineHandle, Message, Published, QUEUE, Refusal, Reply};
 use crate::{
     platform::ReadyProfile,
-    protocol::{FailureKind, Reject, Session, Snapshot},
+    protocol::{
+        ActiveDevice, Command, FailureKind, Library, LibraryItem, LoadState, PlayState, Playback,
+        Reject, Session, Snapshot,
+    },
 };
+use librespot_connect::{ConnectConfig, LoadRequest, LoadRequestOptions, PlayingTrack, Spirc};
 use librespot_core::{authentication::Credentials, cache::Cache, config::SessionConfig};
 use librespot_oauth::DeviceAuthClientBuilder;
+use librespot_playback::player::Player;
+use playback::Event;
 use policy::{
     AfterExpiry, ConnectFailure, PAIRING_LIFETIME, PairingError, PairingRound, backoff,
-    classify_connect_error, classify_pairing_error,
+    classify_connect_error, classify_pairing_error, liked_songs_uri, percent_to_volume,
+    validate_play,
 };
-use std::{io, sync::mpsc as std_mpsc, time::Duration};
+use std::{io, sync::Arc, sync::mpsc as std_mpsc, time::Duration};
 use store::Store;
 use tokio::{
     sync::mpsc,
@@ -39,6 +49,17 @@ const STATE_SUBDIR: &str = "spotify";
 const HEALTH_CHECK: Duration = Duration::from_secs(5);
 /// The OAuth scope needed to stream.
 const SCOPES: [&str; 1] = ["streaming"];
+/// The name Spotify shows for this device.
+const DEVICE_NAME: &str = "PocketSpot";
+/// Volume before the user ever changed it, in percent.
+const DEFAULT_VOLUME: u8 = 50;
+/// A changed volume is saved this long after the last change, so holding a
+/// volume key costs one write.
+const VOLUME_SAVE_DELAY: Duration = Duration::from_secs(1);
+/// How long leaving Spotify Connect may take when a session ends.
+const LEAVE_WITHIN: Duration = Duration::from_secs(1);
+
+type LibraryResult = Result<Vec<LibraryItem>, &'static str>;
 
 /// Start the Spotify engine on its own thread.
 pub fn spawn(profile: &ReadyProfile, published: Published) -> io::Result<EngineHandle> {
@@ -52,16 +73,23 @@ pub fn spawn(profile: &ReadyProfile, published: Published) -> io::Result<EngineH
         tmp_dir: profile.runtime_dir().to_owned(),
         ..SessionConfig::default()
     };
+    let volume = store.volume().unwrap_or(DEFAULT_VOLUME);
     let (tx, rx) = EngineHandle::channel();
     let publisher = published.clone();
     let thread = std::thread::Builder::new()
         .name("pocketspot-spotify".into())
-        .spawn(move || run(rx, store, config, publisher))?;
+        .spawn(move || run(rx, store, config, volume, publisher))?;
     Ok(EngineHandle::new(tx, published, thread))
 }
 
 /// The engine thread: a runtime for librespot, fed by a bridge thread.
-fn run(rx: std_mpsc::Receiver<Message>, store: Store, config: SessionConfig, published: Published) {
+fn run(
+    rx: std_mpsc::Receiver<Message>,
+    store: Store,
+    config: SessionConfig,
+    volume: u8,
+    published: Published,
+) {
     let (async_tx, async_rx) = mpsc::channel(QUEUE);
     let bridge = std::thread::Builder::new()
         .name("pocketspot-spotify-bridge".into())
@@ -102,11 +130,19 @@ fn run(rx: std_mpsc::Receiver<Message>, store: Store, config: SessionConfig, pub
         let driver = Driver {
             rx: async_rx,
             published,
-            state: Snapshot::default(),
+            state: Snapshot {
+                playback: Playback {
+                    volume,
+                    ..Playback::default()
+                },
+                ..Snapshot::default()
+            },
             store,
             config,
             cache,
             attempt: 0,
+            liked_songs: None,
+            volume_save: None,
         };
         driver.run().await;
     });
@@ -117,6 +153,13 @@ enum Flow {
     Pair,
     Connect(Credentials),
     Stop,
+}
+
+/// Why the ready phase ended.
+enum Leave {
+    Lost,
+    Logout(Reply),
+    Flow(Flow),
 }
 
 /// How a wait before retrying ended.
@@ -135,6 +178,10 @@ struct Driver {
     cache: Cache,
     /// Failed connection attempts in a row, for the backoff.
     attempt: u32,
+    /// The signed-in account's Liked Songs URI.
+    liked_songs: Option<String>,
+    /// A volume to save, and when (debounced).
+    volume_save: Option<(u8, Instant)>,
 }
 
 impl Driver {
@@ -265,17 +312,42 @@ impl Driver {
         }
     }
 
-    /// Sign in with `credentials`; on success, stay in the ready phase.
+    /// Sign in with `credentials` and start playback control; on success,
+    /// stay in the ready phase.
     async fn connect(&mut self, credentials: Credentials) -> Flow {
         self.set_session(Session::Connecting);
         log::info!("signing in");
         let session =
             librespot_core::session::Session::new(self.config.clone(), Some(self.cache.clone()));
-        let connecting = session.connect(credentials.clone(), true);
-        tokio::pin!(connecting);
+        let (player, mixer) = match player::build(&session) {
+            Ok(built) => built,
+            Err(message) => {
+                log::error!("audio: {message}");
+                session.shutdown();
+                return self
+                    .retry_later(FailureKind::Audio, message, credentials)
+                    .await;
+            }
+        };
+        let connect_config = ConnectConfig {
+            name: DEVICE_NAME.into(),
+            initial_volume: percent_to_volume(self.state.playback.volume),
+            emit_set_queue_events: true,
+            ..ConnectConfig::default()
+        };
+        // Spirc signs the session in with the credentials, then takes part
+        // in Spotify Connect.
+        let starting = Spirc::new(
+            connect_config,
+            session.clone(),
+            credentials.clone(),
+            player.clone(),
+            mixer,
+        );
+        tokio::pin!(starting);
         let result = loop {
             tokio::select! {
-                result = &mut connecting => break result,
+                result = &mut starting => break result,
                 message = self.rx.recv() => if let Some(flow) = self.while_connecting(message).await {
                     session.shutdown();
                     return flow;
@@ -283,15 +355,22 @@ impl Driver {
             }
         };
         match result {
-            Ok(()) => {
+            Ok((spirc, task)) => {
                 self.attempt = 0;
                 let store = self.store.clone();
                 if let Err(error) = blocking(move || store.tighten_credentials()).await {
                     log::warn!("saved login permissions: {}", error.kind());
                 }
+                self.liked_songs = liked_songs_uri(&session.username());
                 log::info!("signed in");
                 self.set_session(Session::Ready);
-                self.ready(&session).await
+                let leave = self.ready(&session, &player, &spirc, task).await;
+                self.leave_session(&session).await;
+                match leave {
+                    Leave::Lost => self.lost().await,
+                    Leave::Logout(reply) => self.logout(reply).await,
+                    Leave::Flow(flow) => flow,
+                }
             }
             Err(error) => {
                 session.shutdown();
@@ -301,51 +380,232 @@ impl Driver {
                         Flow::Pair
                     }
                     ConnectFailure::Retry(kind) => {
-                        let delay = backoff(self.attempt);
-                        self.attempt = self.attempt.saturating_add(1);
-                        log::warn!(
-                            "signing in failed ({:?}); retrying in {} s",
-                            error.kind,
-                            delay.as_secs()
-                        );
-                        self.fail(kind, "Could not reach Spotify", Some(delay));
-                        match self.wait(delay).await {
-                            Waited::Retry => Flow::Connect(credentials),
-                            Waited::Flow(flow) => flow,
-                        }
+                        log::warn!("signing in failed ({:?})", error.kind);
+                        self.retry_later(kind, "Could not reach Spotify", credentials)
+                            .await
                     }
                 }
             }
         }
     }
 
-    /// Signed in: answer messages and watch the connection.
-    async fn ready(&mut self, session: &librespot_core::session::Session) -> Flow {
+    /// Report a failure, wait with backoff, and sign in again.
+    async fn retry_later(
+        &mut self,
+        kind: FailureKind,
+        message: &str,
+        credentials: Credentials,
+    ) -> Flow {
+        let delay = backoff(self.attempt);
+        self.attempt = self.attempt.saturating_add(1);
+        log::info!("retrying in {} s", delay.as_secs());
+        self.fail(kind, message, Some(delay));
+        match self.wait(delay).await {
+            Waited::Retry => Flow::Connect(credentials),
+            Waited::Flow(flow) => flow,
+        }
+    }
+
+    /// Signed in: play, answer messages, and watch the connection.
+    async fn ready(
+        &mut self,
+        session: &librespot_core::session::Session,
+        player: &Arc<Player>,
+        spirc: &Spirc,
+        task: impl std::future::Future<Output = ()>,
+    ) -> Leave {
+        let mut events = player.get_player_event_channel();
+        let (library_tx, mut library_rx) = mpsc::channel::<LibraryResult>(1);
+        self.load_library(session, &library_tx);
         let mut health = tokio::time::interval(HEALTH_CHECK);
         health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
+        tokio::pin!(task);
+        let leave = loop {
+            let save_at = self.volume_save.map(|(_, at)| at);
             tokio::select! {
+                () = &mut task => {
+                    log::warn!("Spotify Connect stopped");
+                    // The task is finished; it must not be awaited again.
+                    return self.leave_now(spirc, Leave::Lost);
+                }
                 _ = health.tick() => {
-                    if session.is_invalid() {
+                    if session.is_invalid() || player.is_invalid() {
                         log::warn!("connection to Spotify lost");
-                        return self.lost().await;
+                        break Leave::Lost;
                     }
                 }
+                event = events.recv() => match event {
+                    Some(event) => self.player_event(event),
+                    None => {
+                        log::warn!("the player stopped");
+                        break Leave::Lost;
+                    }
+                },
+                Some(result) = library_rx.recv() => self.library_loaded(result),
+                () = sleep_until_opt(save_at), if save_at.is_some() => self.save_volume().await,
                 message = self.rx.recv() => match message {
-                    None | Some(Message::Stop) => {
-                        session.shutdown();
-                        return Flow::Stop;
+                    None | Some(Message::Stop) => break Leave::Flow(Flow::Stop),
+                    Some(Message::Command(command, reply)) => {
+                        let result = self.command(spirc, session, &library_tx, command);
+                        let _ = reply.send(result);
                     }
-                    Some(Message::Command(_, reply)) => refuse(reply, Reject::Unavailable, "playback is not available yet"),
                     Some(Message::Pair(reply)) => refuse(reply, Reject::Invalid, "already signed in"),
-                    Some(Message::Logout(reply)) => {
-                        session.shutdown();
-                        return self.logout(reply).await;
-                    }
+                    Some(Message::Logout(reply)) => break Leave::Logout(reply),
                     #[cfg(feature = "mock")]
                     Some(Message::Inject(_)) => {}
                 },
             }
+        };
+        // Pause and leave Spotify Connect cleanly, but never wait long.
+        let _ = spirc.shutdown();
+        let _ = tokio::time::timeout(LEAVE_WITHIN, &mut task).await;
+        leave
+    }
+
+    /// Leave the ready phase when Spirc's task already ended.
+    fn leave_now(&mut self, spirc: &Spirc, leave: Leave) -> Leave {
+        let _ = spirc.shutdown();
+        leave
+    }
+
+    /// After a session: save a pending volume, close the session and show
+    /// that nothing plays here any more.
+    async fn leave_session(&mut self, session: &librespot_core::session::Session) {
+        if self.volume_save.is_some() {
+            self.save_volume().await;
+        }
+        session.shutdown();
+        self.state.playback.state = PlayState::Stopped;
+        self.state.device = ActiveDevice::None;
+        self.published.publish(&self.state);
+    }
+
+    fn command(
+        &mut self,
+        spirc: &Spirc,
+        session: &librespot_core::session::Session,
+        library_tx: &mpsc::Sender<LibraryResult>,
+        command: Command,
+    ) -> Result<(), Refusal> {
+        let loaded =
+            self.state.playback.track.is_some() && self.state.playback.state != PlayState::Stopped;
+        let nothing_playing = || Refusal::new(Reject::Invalid, "nothing is playing");
+        let sent = match command {
+            Command::Play {
+                context_uri,
+                track_uri,
+            } => {
+                validate_play(
+                    &context_uri,
+                    track_uri.as_deref(),
+                    self.liked_songs.as_deref(),
+                )
+                .map_err(|message| Refusal::new(Reject::Invalid, message))?;
+                let options = LoadRequestOptions {
+                    start_playing: true,
+                    playing_track: track_uri.map(PlayingTrack::Uri),
+                    ..LoadRequestOptions::default()
+                };
+                spirc
+                    .activate()
+                    .and_then(|()| spirc.load(LoadRequest::from_context_uri(context_uri, options)))
+            }
+            Command::Pause if loaded => spirc.pause(),
+            Command::Resume if loaded => spirc.play(),
+            Command::Next if loaded => spirc.next(),
+            Command::Previous if loaded => spirc.prev(),
+            Command::Pause | Command::Resume | Command::Next | Command::Previous => {
+                return Err(nothing_playing());
+            }
+            Command::SetVolume { percent } if percent <= 100 => {
+                spirc.set_volume(percent_to_volume(percent))
+            }
+            Command::SetVolume { .. } => {
+                return Err(Refusal::new(
+                    Reject::Invalid,
+                    "volume must be between 0 and 100",
+                ));
+            }
+            Command::SetShuffle { enabled } => spirc.shuffle(enabled),
+            Command::Stop => {
+                let sent = spirc.disconnect(true);
+                playback::apply(&mut self.state, Event::Stopped, now_ms());
+                self.published.publish(&self.state);
+                sent
+            }
+            Command::RefreshLibrary => {
+                self.load_library(session, library_tx);
+                Ok(())
+            }
+        };
+        sent.map_err(|_| {
+            log::warn!("Spotify Connect did not accept a command");
+            Refusal::new(Reject::Unavailable, "Spotify did not accept the command")
+        })
+    }
+
+    fn player_event(&mut self, event: librespot_playback::player::PlayerEvent) {
+        let Some(event) = player::reduce(event) else {
+            return;
+        };
+        if let Event::Volume { percent } = event {
+            self.volume_save = Some((percent, Instant::now() + VOLUME_SAVE_DELAY));
+        }
+        playback::apply(&mut self.state, event, now_ms());
+        self.published.publish(&self.state);
+    }
+
+    /// Fetch the library in the background; the result arrives on `tx`.
+    fn load_library(
+        &mut self,
+        session: &librespot_core::session::Session,
+        tx: &mpsc::Sender<LibraryResult>,
+    ) {
+        self.state.library.state = LoadState::Loading;
+        self.published.publish(&self.state);
+        let (session, liked, tx) = (session.clone(), self.liked_songs.clone(), tx.clone());
+        tokio::spawn(async move {
+            let result = library::fetch(&session, liked.as_deref()).await;
+            let _ = tx.send(result).await;
+        });
+    }
+
+    fn library_loaded(&mut self, result: LibraryResult) {
+        match result {
+            Ok(items) => {
+                log::info!("library loaded ({} items)", items.len());
+                self.state.library = Library {
+                    state: LoadState::Ready,
+                    items,
+                };
+                // A context shown before the library arrived gets its name.
+                if let Some(context) = &self.state.playback.context
+                    && context.name.is_none()
+                {
+                    let name = playback::context_name(&self.state, &context.uri);
+                    if let Some(context) = &mut self.state.playback.context {
+                        context.name = name;
+                    }
+                }
+            }
+            Err(message) => {
+                log::warn!("library unavailable");
+                self.state.library.state = LoadState::Failed {
+                    message: message.into(),
+                };
+            }
+        }
+        self.published.publish(&self.state);
+    }
+
+    /// Save the pending volume off the runtime thread.
+    async fn save_volume(&mut self) {
+        let Some((percent, _)) = self.volume_save.take() else {
+            return;
+        };
+        let store = self.store.clone();
+        if let Err(error) = blocking(move || store.save_volume(percent)).await {
+            log::warn!("volume not saved: {}", error.kind());
         }
     }
 
@@ -377,6 +637,13 @@ impl Driver {
         match blocking(move || store.remove_credentials()).await {
             Ok(()) => {
                 log::info!("signed out; saved login removed");
+                self.liked_songs = None;
+                let volume = self.state.playback.volume;
+                self.state.playback = Playback {
+                    volume,
+                    ..Playback::default()
+                };
+                self.state.library = Library::default();
                 let _ = reply.send(Ok(()));
                 Flow::Pair
             }
@@ -478,6 +745,14 @@ impl Driver {
                 Some(Message::Inject(_)) => {}
             }
         }
+    }
+}
+
+/// Sleep until `at`, or forever without one.
+async fn sleep_until_opt(at: Option<Instant>) {
+    match at {
+        Some(at) => sleep_until(at).await,
+        None => std::future::pending().await,
     }
 }
 

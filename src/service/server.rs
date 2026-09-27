@@ -22,7 +22,7 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 /// Connections answered at once; more are closed unanswered.
@@ -85,6 +85,12 @@ impl Server {
                 continue;
             }
             self.accept_all(&handler, &active);
+        }
+        // Let clients being answered (such as the one that asked for this
+        // shutdown) receive their reply before the process exits.
+        let deadline = Instant::now() + CLIENT_IO_TIMEOUT;
+        while active.load(Ordering::Acquire) > 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
         }
         Ok(())
     }
@@ -169,7 +175,6 @@ mod tests {
         io::{BufRead, BufReader, Write},
         sync::Mutex,
         thread::JoinHandle,
-        time::Instant,
     };
 
     /// Records requests; answers snapshots and accepts everything else.
@@ -292,6 +297,35 @@ mod tests {
         let started = Instant::now();
         client::request(&running.socket, Request::Identify).unwrap();
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    /// Answers after a delay; `Shutdown` also stops the server first, the
+    /// way the service's handler does.
+    struct SlowStopper(Shutdown);
+
+    impl Handler for SlowStopper {
+        fn handle(&self, request: Request) -> Response {
+            if request == Request::Shutdown {
+                self.0.request();
+            }
+            std::thread::sleep(Duration::from_millis(300));
+            Response::Accepted
+        }
+    }
+
+    #[test]
+    fn the_client_that_asked_to_stop_still_gets_its_reply() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("control.sock");
+        let server = Server::bind(&socket).unwrap();
+        let shutdown = Shutdown::new().unwrap();
+        let handler = Arc::new(SlowStopper(shutdown.clone()));
+        let serving = std::thread::spawn(move || server.run(handler, &shutdown).unwrap());
+        assert_eq!(
+            client::request(&socket, Request::Shutdown).unwrap(),
+            Response::Accepted
+        );
+        serving.join().unwrap();
     }
 
     #[test]

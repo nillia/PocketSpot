@@ -110,6 +110,26 @@ pub(super) fn context(uri: &str) -> Option<(&'static str, Vec<usize>)> {
         .map(|(_, name, tracks)| (*name, tracks.to_vec()))
 }
 
+/// The library: Liked Songs, then the playlists.
+pub(super) fn library() -> Vec<crate::protocol::LibraryItem> {
+    use crate::protocol::{LibraryItem, LibraryKind};
+    let liked = LibraryItem {
+        kind: LibraryKind::LikedSongs,
+        uri: LIKED_SONGS.into(),
+        name: "Liked Songs".into(),
+        owner: None,
+        tracks: u32::try_from(TRACKS.len()).ok(),
+    };
+    let playlists = PLAYLISTS.iter().map(|(uri, name, tracks)| LibraryItem {
+        kind: LibraryKind::Playlist,
+        uri: (*uri).into(),
+        name: (*name).into(),
+        owner: Some("PocketSpot".into()),
+        tracks: u32::try_from(tracks.len()).ok(),
+    });
+    std::iter::once(liked).chain(playlists).collect()
+}
+
 /// Every playlist URI and name, for tests and development.
 pub(super) fn playlists() -> impl Iterator<Item = (&'static str, &'static str)> {
     PLAYLISTS.iter().map(|(uri, name, _)| (*uri, *name))

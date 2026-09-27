@@ -4,6 +4,7 @@
 //!   librespot itself and made owner-only (0600) here
 //! - `spotify/device-id`: the stable Spotify Connect device id, so the
 //!   handheld is the same device for Spotify on every start
+//! - `spotify/volume`: the last volume in percent, restored at start
 //!
 //! Blocking file I/O: call these off the async runtime.
 
@@ -17,6 +18,7 @@ use std::{
 
 pub const CREDENTIALS_FILE: &str = "credentials.json";
 pub const DEVICE_ID_FILE: &str = "device-id";
+pub const VOLUME_FILE: &str = "volume";
 
 #[derive(Clone, Debug)]
 pub struct Store {
@@ -93,6 +95,25 @@ impl Store {
     }
 }
 
+impl Store {
+    /// The saved volume in percent, if there is a valid one.
+    pub fn volume(&self) -> Option<u8> {
+        fs::read_to_string(self.dir.join(VOLUME_FILE))
+            .ok()?
+            .trim()
+            .parse::<u8>()
+            .ok()
+            .filter(|percent| *percent <= 100)
+    }
+
+    pub fn save_volume(&self, percent: u8) -> io::Result<()> {
+        write_private(
+            &self.dir.join(VOLUME_FILE),
+            format!("{}\n", percent.min(100)).as_bytes(),
+        )
+    }
+}
+
 /// A hyphenated UUID, nothing else (it ends up in file names and requests).
 fn valid_device_id(value: &str) -> bool {
     value.len() == 36
@@ -150,6 +171,18 @@ mod tests {
         assert_eq!(again, ID);
         fs::write(dir.path().join(DEVICE_ID_FILE), "../../etc/passwd").unwrap();
         assert!(store.device_id(|| ID.into()).is_err());
+    }
+
+    #[test]
+    fn the_volume_is_saved_privately_and_bad_values_are_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().to_owned());
+        assert_eq!(store.volume(), None);
+        store.save_volume(62).unwrap();
+        assert_eq!(store.volume(), Some(62));
+        assert_eq!(mode(&dir.path().join(VOLUME_FILE)), 0o600);
+        fs::write(dir.path().join(VOLUME_FILE), "250").unwrap();
+        assert_eq!(store.volume(), None);
     }
 
     #[test]

@@ -15,6 +15,49 @@ pub struct Snapshot {
     pub session: Session,
     pub playback: Playback,
     pub device: ActiveDevice,
+    /// The account's playlists and Liked Songs.
+    pub library: Library,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Library {
+    pub state: LoadState,
+    pub items: Vec<LibraryItem>,
+}
+
+/// Progress of something loaded from Spotify.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum LoadState {
+    #[default]
+    Idle,
+    Loading,
+    Ready,
+    Failed {
+        message: String,
+    },
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LibraryItem {
+    pub kind: LibraryKind,
+    /// What to pass as `context_uri` to `play`.
+    pub uri: String,
+    pub name: String,
+    /// The playlist owner's display name, when it is a readable one.
+    pub owner: Option<String>,
+    /// Number of tracks, when known.
+    pub tracks: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LibraryKind {
+    #[default]
+    Playlist,
+    LikedSongs,
 }
 
 /// The Spotify session.

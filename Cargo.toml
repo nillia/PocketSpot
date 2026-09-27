@@ -4,8 +4,18 @@ version = "0.0.0"
 edition = "2024"
 
 [dependencies]
-rustix = { version = "1.1.5", features = ["process"] }
+log = { version = "0.4.34", features = ["std"] }
+rustix = { version = "1.1.5", features = ["event", "fs", "process"] }
+signal-hook = "0.4.4"
 thiserror = "2.0.21"
 
 [dev-dependencies]
 tempfile = "3.27.0"
+
+[lints.rust]
+# No unsafe code so far; lift to "deny" with a documented exception if a
+# future dependency-free FFI call really needs it.
+unsafe_code = "forbid"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "warn"

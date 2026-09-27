@@ -3,12 +3,17 @@
 
 pub mod lock;
 pub mod logging;
+pub mod server;
 pub mod shutdown;
 
-use crate::platform::{Platform, Profile, SystemEnvironment};
+use crate::{
+    platform::{Platform, Profile, SystemEnvironment},
+    protocol::{PROTOCOL_VERSION, Reject, Request, Response, SERVICE_NAME, SOCKET_FILE, Snapshot},
+};
 use lock::{InstanceLock, LockError};
+use server::{Handler, Server};
 use shutdown::Shutdown;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 /// How long a new service waits for a previous one that is still stopping.
 pub const LOCK_PATIENCE: Duration = Duration::from_secs(8);
@@ -80,17 +85,80 @@ pub fn run(explicit: Option<Platform>) -> Exit {
         profile.platform(),
         std::process::id()
     );
+    // The lock is held, so a socket file already there is left over.
+    let server = match Server::bind(&profile.runtime_dir().join(SOCKET_FILE)) {
+        Ok(server) => server,
+        Err(error) => {
+            log::error!("cannot open the control socket: {error}");
+            return Exit::Failed;
+        }
+    };
     eprintln!("pocketspotd: running; log: {}", log_path.display());
-    loop {
-        match shutdown.wait(Duration::from_secs(3600)) {
-            Ok(true) => break,
-            Ok(false) => {}
-            Err(error) => {
-                log::error!("waiting for shutdown failed: {error}");
-                return Exit::Failed;
+    let handler = Arc::new(ServiceHandler {
+        snapshot: Snapshot {
+            revision: start_revision(),
+            ..Snapshot::default()
+        },
+        shutdown: shutdown.clone(),
+    });
+    let result = server.run(handler, &shutdown);
+    // Unreachable from now on, before anything else shuts down.
+    drop(server);
+    match result {
+        Ok(()) => {
+            log::info!("stopped");
+            Exit::Stopped
+        }
+        Err(error) => {
+            log::error!("control socket failed: {error}");
+            Exit::Failed
+        }
+    }
+}
+
+/// The first snapshot revision: the start time in ms × 1000, so a restarted
+/// service never repeats a revision an earlier one reported.
+fn start_revision() -> u64 {
+    let since_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    u64::try_from(since_epoch.as_millis())
+        .unwrap_or(u64::MAX / 1000)
+        .saturating_mul(1000)
+}
+
+/// Answers the protocol. Playback commands become available with the
+/// playback engine.
+struct ServiceHandler {
+    snapshot: Snapshot,
+    shutdown: Shutdown,
+}
+
+impl Handler for ServiceHandler {
+    fn handle(&self, request: Request) -> Response {
+        match request {
+            Request::Identify => Response::Identity {
+                server: SERVICE_NAME.into(),
+                version: env!("CARGO_PKG_VERSION").into(),
+                pid: std::process::id(),
+                protocol: PROTOCOL_VERSION,
+            },
+            Request::Snapshot { since } if since == Some(self.snapshot.revision) => {
+                Response::Unchanged {
+                    revision: self.snapshot.revision,
+                }
+            }
+            Request::Snapshot { .. } => Response::Snapshot {
+                snapshot: Box::new(self.snapshot.clone()),
+            },
+            Request::Command { .. } | Request::Logout => {
+                Response::rejected(Reject::Unavailable, "playback is not available yet")
+            }
+            Request::Shutdown => {
+                log::info!("shutdown requested");
+                self.shutdown.request();
+                Response::Accepted
             }
         }
     }
-    log::info!("stopped");
-    Exit::Stopped
 }

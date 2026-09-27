@@ -1,6 +1,10 @@
 //! End to end: the `pocketspotd` binary, started and signalled as the
 //! launcher and the user would.
 
+use pocketspot::protocol::{
+    self, PROTOCOL_VERSION, Reject, Request, Response,
+    client::{self, ClientError},
+};
 use rustix::process::{Pid, Signal};
 use std::{
     path::{Path, PathBuf},
@@ -37,6 +41,10 @@ impl Dirs {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         command
+    }
+
+    fn socket(&self) -> PathBuf {
+        self.runtime.join("control.sock")
     }
 
     fn log(&self) -> String {
@@ -148,4 +156,74 @@ fn reports_bad_arguments_and_its_version() {
         .unwrap();
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).starts_with("pocketspotd "));
+}
+
+#[test]
+fn answers_the_protocol_and_stops_on_request() {
+    let dirs = Dirs::new();
+    let mut service = dirs.start();
+    let identity = client::identify(&dirs.socket(), Duration::from_secs(2)).unwrap();
+    assert_eq!(identity.server, "pocketspotd");
+    assert_eq!(identity.pid, service.id());
+    assert_eq!(identity.protocol, PROTOCOL_VERSION);
+
+    let Response::Snapshot { snapshot } =
+        client::request(&dirs.socket(), Request::Snapshot { since: None }).unwrap()
+    else {
+        panic!("expected a snapshot");
+    };
+    assert_eq!(
+        client::request(
+            &dirs.socket(),
+            Request::Snapshot {
+                since: Some(snapshot.revision)
+            }
+        )
+        .unwrap(),
+        Response::Unchanged {
+            revision: snapshot.revision
+        }
+    );
+    assert!(matches!(
+        client::request(
+            &dirs.socket(),
+            Request::Command {
+                command: protocol::Command::Next
+            }
+        )
+        .unwrap(),
+        Response::Rejected {
+            reason: Reject::Unavailable,
+            ..
+        }
+    ));
+
+    assert_eq!(
+        client::request(&dirs.socket(), Request::Shutdown).unwrap(),
+        Response::Accepted
+    );
+    assert_eq!(exit_of(&mut service).code(), Some(0));
+    assert!(!dirs.socket().exists(), "the socket goes with the service");
+    assert!(matches!(
+        client::request(&dirs.socket(), Request::Identify),
+        Err(ClientError::NotRunning(_))
+    ));
+}
+
+#[test]
+fn a_socket_left_by_a_killed_service_is_replaced() {
+    let dirs = Dirs::new();
+    let mut killed = dirs.start();
+    signal(&killed, Signal::KILL);
+    exit_of(&mut killed);
+    assert!(dirs.socket().exists(), "SIGKILL leaves the socket behind");
+    let mut next = dirs.start();
+    assert_eq!(
+        client::identify(&dirs.socket(), Duration::from_secs(2))
+            .unwrap()
+            .pid,
+        next.id()
+    );
+    signal(&next, Signal::TERM);
+    assert_eq!(exit_of(&mut next).code(), Some(0));
 }

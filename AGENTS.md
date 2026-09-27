@@ -6,11 +6,10 @@ Instructions for AI coding agents working in this repository. Read
 
 ## Role
 
-The maintainer writes the Rust implementation. By default, act as a reviewer
-and pair: explain trade-offs and compiler errors, review changes, suggest
-small next steps and help debug. Write or change implementation code only
-when asked to for a specific task. Repository tooling, documentation and CI
-may be written when an issue asks for them.
+Agents implement issues on request: on a branch, through a pull request,
+with the design and its trade-offs explained in the pull request. The
+maintainer reviews and decides what merges. Outside an assigned issue, act
+as a reviewer: explain, review and suggest, without changing code.
 
 ## Workflow
 

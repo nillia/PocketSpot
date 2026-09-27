@@ -1,0 +1,62 @@
+name: Device test report
+description: Results of testing a build on real hardware.
+title: "Device test: <version> on <device> / <firmware>"
+labels: ["device-evidence"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Device reports are the evidence for sound, controls, suspend, battery
+        and gaming behaviour. Run each check three times where practical.
+        Never paste tokens, credentials, pairing codes or unredacted logs.
+  - type: input
+    id: build
+    attributes:
+      label: Build
+      description: Release tag or commit, as shown in the package's build information.
+      placeholder: v0.1.0 (abc1234)
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      placeholder: TrimUI Brick
+    validations:
+      required: true
+  - type: input
+    id: firmware
+    attributes:
+      label: Firmware
+      placeholder: NextUI 1.1.1 (73e160c)
+    validations:
+      required: true
+  - type: textarea
+    id: setup
+    attributes:
+      label: Setup
+      description: Audio output, network, other apps or games involved.
+  - type: textarea
+    id: checks
+    attributes:
+      label: Checks
+      description: One row per check.
+      value: |
+        | Check | Steps | Expected | Observed | Runs | Result |
+        |---|---|---|---|---|---|
+        |  |  |  |  |  | Pass / Fail |
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Redacted log excerpts, measurements or capture names.
+      render: text
+  - type: checkboxes
+    id: redacted
+    attributes:
+      label: Privacy
+      options:
+        - label: This report contains no tokens, credentials, pairing codes or unredacted logs.
+          required: true

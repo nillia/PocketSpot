@@ -7,3 +7,15 @@ updates:
     labels: ["type:chore", "area:ci"]
     commit-message:
       prefix: ci
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    labels: ["type:chore"]
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      # Patch and minor updates arrive as one weekly pull request.
+      minor-and-patch:
+        update-types: ["minor", "patch"]

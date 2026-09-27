@@ -19,8 +19,9 @@ Actions.
 5. **Merge.** Once CI passes and the review is done, squash-merge with a
    Conventional Commit title. The branch is deleted after merging.
 
-`main` is protected: it only changes through pull requests, and its history
-stays linear.
+`main` is protected: it only changes through pull requests that pass CI,
+and its history stays linear. Pull requests from contributors need one
+approving review; the maintainer's own pull requests still go through CI.
 
 ## Commit messages
 

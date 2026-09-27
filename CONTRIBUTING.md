@@ -59,11 +59,24 @@ reader of the release notes.
 
 ## Releases
 
-Versions follow [SemVer](https://semver.org/) (pre-1.0: minor versions may
-break). A release is cut from `main` by tagging the release commit
-`vX.Y.Z`; GitHub Actions builds the packages, checksums and licence notices
-and attaches them to the GitHub release. A release is only published once its
-milestone is complete and a device test report confirms it.
+Versions follow [SemVer](https://semver.org/). Before 1.0, `feat` bumps the
+minor version and `fix` the patch version; breaking changes do not jump to
+1.0.
+
+Releases are prepared by [release-please](https://github.com/googleapis/release-please):
+
+1. Every merge to `main` updates an open **release pull request** with the
+   next version (`Cargo.toml`, `Cargo.lock`) and the `CHANGELOG.md` entry,
+   generated from the merged pull request titles.
+2. Merging the release pull request tags the release commit `vX.Y.Z` and
+   creates a **draft** GitHub release with those notes. The release
+   workflow then builds the artifacts from that tag and attaches them.
+3. The draft is published once the milestone is complete and a device test
+   report confirms the build.
+
+Release-please runs as the *PocketSpot Release* GitHub App (repository
+variable `RELEASE_APP_CLIENT_ID`, secret `RELEASE_APP_PRIVATE_KEY`), so its
+pull requests run CI like any other.
 
 ## Labels and milestones
 
